@@ -22,6 +22,7 @@ function saveLichHoc(data) {
 
 // ====== NHẮC LỊCH TỰ ĐỘNG ======
 let jobs = [];
+let reminders = {}; // {chatId_subject: intervalId}
 
 function setupSchedules(data) {
   // Hủy job cũ
@@ -35,7 +36,17 @@ function setupSchedules(data) {
     const job = schedule.scheduleJob(
       { hour: parseInt(hour), minute: parseInt(minute) },
       () => {
-        bot.sendMessage(item.chatId, `⏰ Nhắc nhở: ${item.subject}`);
+        const key = `${item.chatId}_${item.subject}`;
+        if (reminders[key]) return; // tránh tạo trùng
+
+        bot.sendMessage(item.chatId, `⏰ Đến giờ học: ${item.subject}\n👉 Gõ /done để xác nhận.`);
+
+        // Nhắc lại mỗi 30s
+        const intervalId = setInterval(() => {
+          bot.sendMessage(item.chatId, `⏰ Nhắc lại: ${item.subject}\n👉 Gõ /done để xác nhận.`);
+        }, 30 * 1000);
+
+        reminders[key] = intervalId;
       }
     );
     jobs.push(job);
@@ -50,6 +61,7 @@ bot.onText(/\/start/, (msg) => {
 /lichhoc - Xem lịch học
 /themlich [giờ] [môn] - Thêm lịch (VD: /themlich 09:00 Toán cao cấp)
 /xoalich [số] - Xóa lịch
+/done - Xác nhận đã học, dừng nhắc
 /joke - Nghe 1 câu đùa
 /nhac [tên bài] - Tìm nhạc YouTube
 /help - Hướng dẫn chi tiết
@@ -62,6 +74,7 @@ bot.onText(/\/help/, (msg) => {
 /themlich [giờ] [môn] → Thêm lịch học (VD: /themlich 14:30 Lập trình Web)
 /lichhoc → Xem danh sách lịch học
 /xoalich [số] → Xóa lịch theo số thứ tự
+/done → Xác nhận đã học, dừng nhắc
 /joke → Kể chuyện cười
 /nhac [tên bài] → Tìm nhạc trên YouTube
   `);
@@ -104,6 +117,18 @@ bot.onText(/\/xoalich (.+)/, (msg, match) => {
   } else {
     bot.sendMessage(msg.chat.id, "❌ Không tìm thấy lịch với số thứ tự đó.");
   }
+});
+
+// ====== XÁC NHẬN DONE ======
+bot.onText(/\/done/, (msg) => {
+  const chatId = msg.chat.id;
+  Object.keys(reminders).forEach(key => {
+    if (key.startsWith(`${chatId}_`)) {
+      clearInterval(reminders[key]);
+      delete reminders[key];
+      bot.sendMessage(chatId, "✅ Bạn đã xác nhận, bot sẽ dừng nhắc.");
+    }
+  });
 });
 
 // ====== JOKE ======
