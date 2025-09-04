@@ -1,17 +1,26 @@
 const ZaloBot = require('node-zalo-bot');
 const fs = require('fs');
+const path = require('path');
 const schedule = require('node-schedule');
 const pdf = require('pdf-parse');
+const fetch = require('node-fetch');
 require('dotenv').config({ path: './test.env' });
 
 const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: true });
 
 console.log("🤖 Bot Zalo đã khởi động!");
 
+// ====== TRẠNG THÁI IMPORT ======
+let waitingForPdf = {}; // { chatId: true/false }
+
 // ====== QUẢN LÝ LỊCH HỌC (đa người dùng) ======
 function loadLichHoc() {
   if (fs.existsSync("lichhoc.json")) {
-    return JSON.parse(fs.readFileSync("lichhoc.json"));
+    let data = JSON.parse(fs.readFileSync("lichhoc.json"));
+    if (Array.isArray(data)) {
+      data = { "default": data };
+    }
+    return data;
   }
   return {};
 }
@@ -30,7 +39,7 @@ function setupSchedules(data) {
   jobs = [];
 
   Object.keys(data).forEach(chatId => {
-    data[chatId].forEach(item => {
+    (data[chatId] || []).forEach(item => {
       const [hour, minute] = item.time.split(":");
       if (isNaN(hour) || isNaN(minute)) return;
 
@@ -55,11 +64,11 @@ function setupSchedules(data) {
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(msg.chat.id, `
 📚 MENU BOT
-/themlich [giờ] [môn] - Thêm lịch (VD: /themlich 09:00 Toán)
+/themlich [giờ] [môn] - Thêm lịch
 /lichhoc - Xem lịch học
 /xoalich [số] - Xóa lịch
 /import - Import lịch từ file PDF
-/done - Xác nhận đã học, dừng nhắc
+/done - Xác nhận đã học
 /joke - Nghe 1 câu đùa
 /nhac [tên bài] - Tìm nhạc YouTube
 /help - Hướng dẫn chi tiết
@@ -69,13 +78,13 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/help/, (msg) => {
   bot.sendMessage(msg.chat.id, `
 ℹ️ Hướng dẫn:
-/themlich 09:00 Toán → Thêm lịch
-/lichhoc → Xem danh sách
-/xoalich 1 → Xóa lịch số 1
-/import → Gửi file PDF lịch học để bot tạo lịch tự động
-/done → Dừng nhắc lịch
-/joke → Câu đùa
-/nhac Sơn Tùng → Tìm nhạc
+/themlich 09:00 Toán → thêm lịch
+/lichhoc → xem danh sách
+/xoalich 1 → xóa lịch số 1
+/import → gửi file PDF lịch học
+/done → dừng nhắc
+/joke → câu đùa
+/nhac Sơn Tùng → tìm nhạc
   `);
 });
 
@@ -125,31 +134,59 @@ bot.onText(/\/xoalich (.+)/, (msg, match) => {
 });
 
 // ====== IMPORT LỊCH TỪ PDF ======
-bot.onText(/\/import/, async (msg) => {
-  try {
-    // ⚠️ Chỗ này cần xử lý file PDF upload từ Zalo, ví dụ tạm mình dùng sẵn 1 file trên VPS
-    let dataBuffer = fs.readFileSync("download.pdf"); 
-    let dataPdf = await pdf(dataBuffer);
-    let text = dataPdf.text;
+bot.onText(/\/import/, (msg) => {
+  waitingForPdf[msg.chat.id] = true;
+  bot.sendMessage(msg.chat.id, "📂 Vui lòng gửi file PDF lịch học (tin nhắn kế tiếp).");
+});
 
-    let lich = [];
-    const lines = text.split("\n");
-    lines.forEach(line => {
-      if (line.includes("Tiết")) {
-        const subject = line.split("Tiết")[0].trim();
-        // ⚠️ TODO: convert Tiết thành giờ cụ thể
-        lich.push({ time: "07:30", subject });
+bot.on('message', async (msg) => {
+  if (waitingForPdf[msg.chat.id] && msg.attachment && msg.attachment.type === 'file') {
+    try {
+      const mediaId = msg.attachment.payload.id; // ID file từ Zalo
+
+      // Gọi API lấy link download
+      const url = `https://openapi.zalo.me/v2.0/oa/getmedia?access_token=${process.env.BOT_TOKEN}&message_id=${mediaId}`;
+      const res = await fetch(url);
+      const result = await res.json();
+
+      if (!result.data || !result.data.url) {
+        return bot.sendMessage(msg.chat.id, "❌ Không lấy được file từ Zalo.");
       }
-    });
 
-    let dataAll = loadLichHoc();
-    dataAll[msg.chat.id] = lich;
-    saveLichHoc(dataAll);
+      // Tải file PDF về VPS
+      const fileUrl = result.data.url;
+      const pdfPath = path.join(__dirname, "imported.pdf");
+      const fileRes = await fetch(fileUrl);
+      const fileBuffer = await fileRes.buffer();
+      fs.writeFileSync(pdfPath, fileBuffer);
 
-    bot.sendMessage(msg.chat.id, `✅ Đã import ${lich.length} lịch học từ file PDF`);
-  } catch (err) {
-    console.error(err);
-    bot.sendMessage(msg.chat.id, "❌ Lỗi khi đọc file PDF.");
+      // Đọc PDF
+      const dataBuffer = fs.readFileSync(pdfPath);
+      const dataPdf = await pdf(dataBuffer);
+      const text = dataPdf.text;
+
+      // Parse text đơn giản
+      let lich = [];
+      text.split("\n").forEach(line => {
+        if (line.includes("Tiết")) {
+          const subject = line.split("Tiết")[0].trim();
+          // TODO: sau này quy đổi "Tiết" thành giờ
+          lich.push({ time: "07:30", subject });
+        }
+      });
+
+      // Lưu vào lịch của user
+      let dataAll = loadLichHoc();
+      dataAll[msg.chat.id] = lich;
+      saveLichHoc(dataAll);
+
+      bot.sendMessage(msg.chat.id, `✅ Đã import ${lich.length} lịch học từ PDF.`);
+    } catch (err) {
+      console.error(err);
+      bot.sendMessage(msg.chat.id, "❌ Lỗi khi xử lý file PDF.");
+    } finally {
+      waitingForPdf[msg.chat.id] = false;
+    }
   }
 });
 
@@ -184,7 +221,7 @@ bot.onText(/\/nhac (.+)/, (msg, match) => {
 
 // ====== DEFAULT ======
 bot.on('message', (msg) => {
-  if (msg.text && !msg.text.startsWith("/")) {
+  if (msg.text && !msg.text.startsWith("/") && !msg.attachment) {
     bot.sendMessage(msg.chat.id, "🤔 Tôi chưa hiểu, hãy gõ /start để xem lệnh nhé!");
   }
 });
