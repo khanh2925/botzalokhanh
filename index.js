@@ -1,55 +1,53 @@
 const ZaloBot = require('node-zalo-bot');
 const fs = require('fs');
 const schedule = require('node-schedule');
+const pdf = require('pdf-parse');
 require('dotenv').config({ path: './test.env' });
 
 const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: true });
 
 console.log("🤖 Bot Zalo đã khởi động!");
 
-// ====== QUẢN LÝ LỊCH HỌC ======
+// ====== QUẢN LÝ LỊCH HỌC (đa người dùng) ======
 function loadLichHoc() {
   if (fs.existsSync("lichhoc.json")) {
     return JSON.parse(fs.readFileSync("lichhoc.json"));
   }
-  return [];
+  return {};
 }
 
 function saveLichHoc(data) {
   fs.writeFileSync("lichhoc.json", JSON.stringify(data, null, 2));
-  setupSchedules(data); // Cập nhật lại nhắc nhở
+  setupSchedules(data);
 }
 
 // ====== NHẮC LỊCH TỰ ĐỘNG ======
 let jobs = [];
-let reminders = {}; // {chatId_subject: intervalId}
+let reminders = {};
 
 function setupSchedules(data) {
-  // Hủy job cũ
   jobs.forEach(job => job.cancel());
   jobs = [];
 
-  data.forEach((item) => {
-    const [hour, minute] = item.time.split(":");
-    if (isNaN(hour) || isNaN(minute)) return;
+  Object.keys(data).forEach(chatId => {
+    data[chatId].forEach(item => {
+      const [hour, minute] = item.time.split(":");
+      if (isNaN(hour) || isNaN(minute)) return;
 
-    const job = schedule.scheduleJob(
-      { hour: parseInt(hour), minute: parseInt(minute) },
-      () => {
-        const key = `${item.chatId}_${item.subject}`;
-        if (reminders[key]) return; // tránh tạo trùng
-
-        bot.sendMessage(item.chatId, `⏰ Đến giờ học: ${item.subject}\n👉 Gõ /done để xác nhận.`);
-
-        // Nhắc lại mỗi 30s
-        const intervalId = setInterval(() => {
-          bot.sendMessage(item.chatId, `⏰ Nhắc lại: ${item.subject}\n👉 Gõ /done để xác nhận.`);
-        }, 30 * 1000);
-
-        reminders[key] = intervalId;
-      }
-    );
-    jobs.push(job);
+      const job = schedule.scheduleJob(
+        { hour: parseInt(hour), minute: parseInt(minute) },
+        () => {
+          const key = `${chatId}_${item.subject}`;
+          if (reminders[key]) return;
+          bot.sendMessage(chatId, `⏰ Đến giờ học: ${item.subject}\n👉 Gõ /done để xác nhận.`);
+          const intervalId = setInterval(() => {
+            bot.sendMessage(chatId, `⏰ Nhắc lại: ${item.subject}\n👉 Gõ /done để xác nhận.`);
+          }, 30 * 1000);
+          reminders[key] = intervalId;
+        }
+      );
+      jobs.push(job);
+    });
   });
 }
 
@@ -57,10 +55,10 @@ function setupSchedules(data) {
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(msg.chat.id, `
 📚 MENU BOT
-/start - Hiển thị menu
+/themlich [giờ] [môn] - Thêm lịch (VD: /themlich 09:00 Toán)
 /lichhoc - Xem lịch học
-/themlich [giờ] [môn] - Thêm lịch (VD: /themlich 09:00 Toán cao cấp)
 /xoalich [số] - Xóa lịch
+/import - Import lịch từ file PDF
 /done - Xác nhận đã học, dừng nhắc
 /joke - Nghe 1 câu đùa
 /nhac [tên bài] - Tìm nhạc YouTube
@@ -71,25 +69,25 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/help/, (msg) => {
   bot.sendMessage(msg.chat.id, `
 ℹ️ Hướng dẫn:
-/themlich [giờ] [môn] → Thêm lịch học (VD: /themlich 14:30 Lập trình Web)
-/lichhoc → Xem danh sách lịch học
-/xoalich [số] → Xóa lịch theo số thứ tự
-/done → Xác nhận đã học, dừng nhắc
-/joke → Kể chuyện cười
-/nhac [tên bài] → Tìm nhạc trên YouTube
+/themlich 09:00 Toán → Thêm lịch
+/lichhoc → Xem danh sách
+/xoalich 1 → Xóa lịch số 1
+/import → Gửi file PDF lịch học để bot tạo lịch tự động
+/done → Dừng nhắc lịch
+/joke → Câu đùa
+/nhac Sơn Tùng → Tìm nhạc
   `);
 });
 
 // ====== LỊCH HỌC ======
 bot.onText(/\/lichhoc/, (msg) => {
-  const lich = loadLichHoc();
+  const data = loadLichHoc();
+  const lich = data[msg.chat.id] || [];
   if (lich.length === 0) {
     return bot.sendMessage(msg.chat.id, "📭 Chưa có lịch học nào.");
   }
   let text = "📅 Lịch học của bạn:\n";
-  lich.forEach((l, i) => {
-    text += `${i + 1}. ⏰ ${l.time} → ${l.subject}\n`;
-  });
+  lich.forEach((l, i) => text += `${i + 1}. ⏰ ${l.time} → ${l.subject}\n`);
   bot.sendMessage(msg.chat.id, text);
 });
 
@@ -98,28 +96,64 @@ bot.onText(/\/themlich (.+)/, (msg, match) => {
   const parts = input.split(" ");
   const time = parts.shift();
   const subject = parts.join(" ");
+
   if (!time || !subject) {
     return bot.sendMessage(msg.chat.id, "❌ Sai cú pháp.\nVD: /themlich 09:00 Lập trình Web");
   }
-  const lich = loadLichHoc();
-  lich.push({ time, subject, chatId: msg.chat.id });
-  saveLichHoc(lich);
+
+  let data = loadLichHoc();
+  if (!data[msg.chat.id]) data[msg.chat.id] = [];
+  data[msg.chat.id].push({ time, subject });
+  saveLichHoc(data);
+
   bot.sendMessage(msg.chat.id, `✅ Đã thêm lịch: ${time} - ${subject}`);
 });
 
 bot.onText(/\/xoalich (.+)/, (msg, match) => {
   const index = parseInt(match[1]) - 1;
-  const lich = loadLichHoc();
+  let data = loadLichHoc();
+  let lich = data[msg.chat.id] || [];
+
   if (index >= 0 && index < lich.length) {
     const removed = lich.splice(index, 1);
-    saveLichHoc(lich);
+    data[msg.chat.id] = lich;
+    saveLichHoc(data);
     bot.sendMessage(msg.chat.id, `🗑️ Đã xóa lịch: ${removed[0].time} - ${removed[0].subject}`);
   } else {
     bot.sendMessage(msg.chat.id, "❌ Không tìm thấy lịch với số thứ tự đó.");
   }
 });
 
-// ====== XÁC NHẬN DONE ======
+// ====== IMPORT LỊCH TỪ PDF ======
+bot.onText(/\/import/, async (msg) => {
+  try {
+    // ⚠️ Chỗ này cần xử lý file PDF upload từ Zalo, ví dụ tạm mình dùng sẵn 1 file trên VPS
+    let dataBuffer = fs.readFileSync("download.pdf"); 
+    let dataPdf = await pdf(dataBuffer);
+    let text = dataPdf.text;
+
+    let lich = [];
+    const lines = text.split("\n");
+    lines.forEach(line => {
+      if (line.includes("Tiết")) {
+        const subject = line.split("Tiết")[0].trim();
+        // ⚠️ TODO: convert Tiết thành giờ cụ thể
+        lich.push({ time: "07:30", subject });
+      }
+    });
+
+    let dataAll = loadLichHoc();
+    dataAll[msg.chat.id] = lich;
+    saveLichHoc(dataAll);
+
+    bot.sendMessage(msg.chat.id, `✅ Đã import ${lich.length} lịch học từ file PDF`);
+  } catch (err) {
+    console.error(err);
+    bot.sendMessage(msg.chat.id, "❌ Lỗi khi đọc file PDF.");
+  }
+});
+
+// ====== DONE ======
 bot.onText(/\/done/, (msg) => {
   const chatId = msg.chat.id;
   Object.keys(reminders).forEach(key => {
@@ -155,5 +189,4 @@ bot.on('message', (msg) => {
   }
 });
 
-// Load lịch khi khởi động bot
 setupSchedules(loadLichHoc());
