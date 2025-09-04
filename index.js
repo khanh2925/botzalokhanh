@@ -2,8 +2,8 @@ const ZaloBot = require('node-zalo-bot');
 const fs = require('fs');
 const path = require('path');
 const schedule = require('node-schedule');
-const pdf = require('pdf-parse');
-const fetch = require('node-fetch');
+const axios = require('axios');
+const Tesseract = require('tesseract.js');
 require('dotenv').config({ path: './test.env' });
 
 const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: true });
@@ -11,9 +11,9 @@ const bot = new ZaloBot(process.env.BOT_TOKEN, { polling: true });
 console.log("🤖 Bot Zalo đã khởi động!");
 
 // ====== TRẠNG THÁI IMPORT ======
-let waitingForPdf = {}; // { chatId: true/false }
+let waitingForImage = {}; // { chatId: true/false }
 
-// ====== QUẢN LÝ LỊCH HỌC (đa người dùng) ======
+// ====== QUẢN LÝ LỊCH HỌC ======
 function loadLichHoc() {
   if (fs.existsSync("lichhoc.json")) {
     let data = JSON.parse(fs.readFileSync("lichhoc.json"));
@@ -30,7 +30,7 @@ function saveLichHoc(data) {
   setupSchedules(data);
 }
 
-// ====== NHẮC LỊCH TỰ ĐỘNG ======
+// ====== NHẮC LỊCH ======
 let jobs = [];
 let reminders = {};
 
@@ -67,7 +67,7 @@ bot.onText(/\/start/, (msg) => {
 /themlich [giờ] [môn] - Thêm lịch
 /lichhoc - Xem lịch học
 /xoalich [số] - Xóa lịch
-/import - Import lịch từ file PDF
+/importimg - Import lịch từ ảnh (OCR)
 /done - Xác nhận đã học
 /joke - Nghe 1 câu đùa
 /nhac [tên bài] - Tìm nhạc YouTube
@@ -75,13 +75,14 @@ bot.onText(/\/start/, (msg) => {
   `);
 });
 
+// ====== HƯỚNG DẪN ======
 bot.onText(/\/help/, (msg) => {
   bot.sendMessage(msg.chat.id, `
 ℹ️ Hướng dẫn:
 /themlich 09:00 Toán → thêm lịch
 /lichhoc → xem danh sách
 /xoalich 1 → xóa lịch số 1
-/import → gửi file PDF lịch học
+/importimg → gửi ảnh thời khóa biểu, bot sẽ đọc OCR
 /done → dừng nhắc
 /joke → câu đùa
 /nhac Sơn Tùng → tìm nhạc
@@ -133,59 +134,48 @@ bot.onText(/\/xoalich (.+)/, (msg, match) => {
   }
 });
 
-// ====== IMPORT LỊCH TỪ PDF ======
-bot.onText(/\/import/, (msg) => {
-  waitingForPdf[msg.chat.id] = true;
-  bot.sendMessage(msg.chat.id, "📂 Vui lòng gửi file PDF lịch học (tin nhắn kế tiếp).");
+// ====== IMPORT LỊCH TỪ ẢNH ======
+bot.onText(/\/importimg/, (msg) => {
+  waitingForImage[msg.chat.id] = true;
+  bot.sendMessage(msg.chat.id, "📷 Vui lòng gửi ảnh thời khóa biểu (ảnh rõ chữ).");
 });
 
 bot.on('message', async (msg) => {
-  if (waitingForPdf[msg.chat.id] && msg.attachment && msg.attachment.type === 'file') {
+  if (waitingForImage[msg.chat.id] && msg.attachment && msg.attachment.type === 'photo') {
     try {
-      const mediaId = msg.attachment.payload.id; // ID file từ Zalo
-
-      // Gọi API lấy link download
+      const mediaId = msg.attachment.payload.id;
       const url = `https://openapi.zalo.me/v2.0/oa/getmedia?access_token=${process.env.BOT_TOKEN}&message_id=${mediaId}`;
-      const res = await fetch(url);
-      const result = await res.json();
 
-      if (!result.data || !result.data.url) {
-        return bot.sendMessage(msg.chat.id, "❌ Không lấy được file từ Zalo.");
+      // Lấy link ảnh từ Zalo
+      const res = await axios.get(url);
+      if (!res.data.data || !res.data.data.url) {
+        return bot.sendMessage(msg.chat.id, "❌ Không lấy được ảnh từ Zalo.");
       }
+      const imageUrl = res.data.data.url;
 
-      // Tải file PDF về VPS
-      const fileUrl = result.data.url;
-      const pdfPath = path.join(__dirname, "imported.pdf");
-      const fileRes = await fetch(fileUrl);
-      const fileBuffer = await fileRes.buffer();
-      fs.writeFileSync(pdfPath, fileBuffer);
+      // OCR ảnh
+      const { data: { text } } = await Tesseract.recognize(imageUrl, 'vie+eng');
+      console.log("OCR:", text);
 
-      // Đọc PDF
-      const dataBuffer = fs.readFileSync(pdfPath);
-      const dataPdf = await pdf(dataBuffer);
-      const text = dataPdf.text;
-
-      // Parse text đơn giản
+      // Parse lịch (demo: tìm dòng có chữ 'Tiết')
       let lich = [];
       text.split("\n").forEach(line => {
         if (line.includes("Tiết")) {
           const subject = line.split("Tiết")[0].trim();
-          // TODO: sau này quy đổi "Tiết" thành giờ
-          lich.push({ time: "07:30", subject });
+          lich.push({ time: "07:30", subject }); // TODO: sau này quy đổi tiết → giờ
         }
       });
 
-      // Lưu vào lịch của user
       let dataAll = loadLichHoc();
       dataAll[msg.chat.id] = lich;
       saveLichHoc(dataAll);
 
-      bot.sendMessage(msg.chat.id, `✅ Đã import ${lich.length} lịch học từ PDF.`);
+      bot.sendMessage(msg.chat.id, `✅ Đã import ${lich.length} lịch học từ ảnh OCR.`);
     } catch (err) {
       console.error(err);
-      bot.sendMessage(msg.chat.id, "❌ Lỗi khi xử lý file PDF.");
+      bot.sendMessage(msg.chat.id, "❌ Lỗi khi xử lý ảnh.");
     } finally {
-      waitingForPdf[msg.chat.id] = false;
+      waitingForImage[msg.chat.id] = false;
     }
   }
 });
@@ -212,7 +202,7 @@ bot.onText(/\/joke/, (msg) => {
   bot.sendMessage(msg.chat.id, jokes[Math.floor(Math.random() * jokes.length)]);
 });
 
-// ====== NGHE NHẠC ======
+// ====== NHẠC ======
 bot.onText(/\/nhac (.+)/, (msg, match) => {
   const query = match[1];
   const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
