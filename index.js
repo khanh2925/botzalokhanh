@@ -17,26 +17,25 @@ function loadLichHoc() {
 
 function saveLichHoc(data) {
   fs.writeFileSync("lichhoc.json", JSON.stringify(data, null, 2));
-  setupSchedules(data); // Cập nhật lịch nhắc nhở
+  setupSchedules(data); // Cập nhật lại nhắc nhở
 }
 
 // ====== NHẮC LỊCH TỰ ĐỘNG ======
-let jobs = []; // lưu job đang chạy
+let jobs = [];
 
 function setupSchedules(data) {
   // Hủy job cũ
   jobs.forEach(job => job.cancel());
   jobs = [];
 
-  // Tạo job mới
-  data.forEach((item, i) => {
+  data.forEach((item) => {
     const [hour, minute] = item.time.split(":");
     if (isNaN(hour) || isNaN(minute)) return;
 
     const job = schedule.scheduleJob(
       { hour: parseInt(hour), minute: parseInt(minute) },
       () => {
-        bot.sendMessage(item.chatId || globalChatId, `⏰ Nhắc nhở: ${item.subject}`);
+        bot.sendMessage(item.chatId, `⏰ Nhắc nhở: ${item.subject}`);
       }
     );
     jobs.push(job);
@@ -45,19 +44,30 @@ function setupSchedules(data) {
 
 // ====== MENU ======
 bot.onText(/\/start/, (msg) => {
-  globalChatId = msg.chat.id; // lưu id chat mặc định
   bot.sendMessage(msg.chat.id, `
 📚 MENU BOT
 /start - Hiển thị menu
 /lichhoc - Xem lịch học
-/themlich [giờ] [môn học] - Thêm lịch (VD: /themlich 9:00 Toán cao cấp)
-/xoalich [số thứ tự] - Xóa lịch
+/themlich [giờ] [môn] - Thêm lịch (VD: /themlich 09:00 Toán cao cấp)
+/xoalich [số] - Xóa lịch
 /joke - Nghe 1 câu đùa
 /nhac [tên bài] - Tìm nhạc YouTube
+/help - Hướng dẫn chi tiết
   `);
 });
 
-// Xem lịch
+bot.onText(/\/help/, (msg) => {
+  bot.sendMessage(msg.chat.id, `
+ℹ️ Hướng dẫn:
+/themlich [giờ] [môn] → Thêm lịch học (VD: /themlich 14:30 Lập trình Web)
+/lichhoc → Xem danh sách lịch học
+/xoalich [số] → Xóa lịch theo số thứ tự
+/joke → Kể chuyện cười
+/nhac [tên bài] → Tìm nhạc trên YouTube
+  `);
+});
+
+// ====== LỊCH HỌC ======
 bot.onText(/\/lichhoc/, (msg) => {
   const lich = loadLichHoc();
   if (lich.length === 0) {
@@ -70,14 +80,13 @@ bot.onText(/\/lichhoc/, (msg) => {
   bot.sendMessage(msg.chat.id, text);
 });
 
-// Thêm lịch
 bot.onText(/\/themlich (.+)/, (msg, match) => {
   const input = match[1];
   const parts = input.split(" ");
   const time = parts.shift();
   const subject = parts.join(" ");
   if (!time || !subject) {
-    return bot.sendMessage(msg.chat.id, "❌ Sai cú pháp.\nVD: /themlich 9:00 Lập trình Web");
+    return bot.sendMessage(msg.chat.id, "❌ Sai cú pháp.\nVD: /themlich 09:00 Lập trình Web");
   }
   const lich = loadLichHoc();
   lich.push({ time, subject, chatId: msg.chat.id });
@@ -85,7 +94,6 @@ bot.onText(/\/themlich (.+)/, (msg, match) => {
   bot.sendMessage(msg.chat.id, `✅ Đã thêm lịch: ${time} - ${subject}`);
 });
 
-// Xóa lịch
 bot.onText(/\/xoalich (.+)/, (msg, match) => {
   const index = parseInt(match[1]) - 1;
   const lich = loadLichHoc();
